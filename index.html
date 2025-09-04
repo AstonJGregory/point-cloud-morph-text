@@ -1,0 +1,150 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Three.js Point Cloud</title>
+  <style>
+    html,body{height:100%;margin:0}
+    canvas{display:block}
+    #ui-toggle{
+      position:fixed; top:12px; left:12px; z-index:20;
+      background:#111; color:#eee; border:1px solid #333; border-radius:6px;
+      padding:6px 10px; font:12px/1.2 system-ui, sans-serif; cursor:pointer;
+      opacity:0.85
+    }
+    #ui-panel{
+      position:fixed; top:12px; left:12px; z-index:30; width:290px; max-height:90vh;
+      overflow:auto; background:rgba(0,0,0,0.7); color:#eee; border:1px solid #333;
+      border-radius:10px; padding:10px 10px 12px; backdrop-filter: blur(4px);
+      font:12px/1.35 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    #ui-panel.hidden{ display:none }
+    #ui-panel h3{ margin:8px 0 6px; font-size:12px; font-weight:700; color:#ddd; }
+    #ui-panel .row{ display:flex; align-items:center; gap:8px; margin:6px 0 }
+    #ui-panel label{ flex:1 1 auto; }
+    #ui-panel input[type="range"]{ width:120px; }
+    #ui-panel input[type="checkbox"]{ transform: translateY(1px); }
+    #ui-panel .val{ width:46px; text-align:right; color:#bbb; font-variant-numeric: tabular-nums; }
+    #ui-panel hr{ border:0; border-top:1px solid #333; margin:8px 0 }
+    #ui-panel .subtle{ color:#aaa }
+  </style>
+
+  <!-- Map bare specifiers to CDN URLs -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.156.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.156.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <button id="ui-toggle" title="Toggle Controls">UI</button>
+  <div id="ui-panel">
+    <h3>Points</h3>
+    <div class="row"><label>Density</label>
+      <input id="ui-density" type="range" min="0.02" max="1" step="0.01" />
+      <div class="val" id="ui-density-val"></div>
+    </div>
+    <div class="row"><label>Point Size</label>
+      <input id="ui-psize" type="range" min="0.5" max="12" step="0.1" />
+      <div class="val" id="ui-psize-val"></div>
+    </div>
+    <div class="row"><label>Scatter</label>
+      <input id="ui-scatter" type="range" min="0" max="0.5" step="0.001" />
+      <div class="val" id="ui-scatter-val"></div>
+    </div>
+    <div class="row"><label>World-size</label>
+      <input id="ui-worldsize" type="checkbox" />
+    </div>
+    <div class="row"><label>Size Attenuation</label>
+      <input id="ui-atten" type="checkbox" />
+    </div>
+    <div class="row"><label>Grid</label>
+      <input id="ui-grid" type="checkbox" />
+    </div>
+
+    <h3>Wind</h3>
+    <div class="row"><label>Enabled</label>
+      <input id="ui-wind-enabled" type="checkbox" />
+    </div>
+    <div class="row"><label>Amplitude</label>
+      <input id="ui-wind-amp" type="range" min="0" max="0.1" step="0.001" />
+      <div class="val" id="ui-wind-amp-val"></div>
+    </div>
+    <div class="row"><label>Frequency</label>
+      <input id="ui-wind-freq" type="range" min="0" max="2" step="0.01" />
+      <div class="val" id="ui-wind-freq-val"></div>
+    </div>
+    <div class="row"><label>Spatial</label>
+      <input id="ui-wind-spatial" type="range" min="0" max="3" step="0.01" />
+      <div class="val" id="ui-wind-spatial-val"></div>
+    </div>
+
+    <h3>Wave</h3>
+    <div class="row"><label>Length</label>
+      <input id="ui-wave-length" type="range" min="0.1" max="2" step="0.01" />
+      <div class="val" id="ui-wave-length-val"></div>
+    </div>
+    <div class="row"><label>Speed</label>
+      <input id="ui-wave-speed" type="range" min="0" max="2" step="0.01" />
+      <div class="val" id="ui-wave-speed-val"></div>
+    </div>
+    <div class="row"><label>Width</label>
+      <input id="ui-wave-width" type="range" min="0.02" max="0.5" step="0.01" />
+      <div class="val" id="ui-wave-width-val"></div>
+    </div>
+    <div class="row"><label>Band Gamma</label>
+      <input id="ui-wave-gamma" type="range" min="0.5" max="3" step="0.05" />
+      <div class="val" id="ui-wave-gamma-val"></div>
+    </div>
+
+    <h3>Post FX</h3>
+    <div class="row"><label>Bloom</label>
+      <input id="ui-bloom" type="checkbox" />
+    </div>
+    <div class="row"><label>Bloom Strength</label>
+      <input id="ui-bloom-strength" type="range" min="0" max="3" step="0.01" />
+      <div class="val" id="ui-bloom-strength-val"></div>
+    </div>
+    <div class="row"><label>Vignette</label>
+      <input id="ui-vignette" type="checkbox" />
+    </div>
+    <div class="row"><label>Darkness</label>
+      <input id="ui-vignette-dark" type="range" min="0" max="2" step="0.01" />
+      <div class="val" id="ui-vignette-dark-val"></div>
+    </div>
+    <div class="row"><label>Brightness/Contrast</label>
+      <input id="ui-bc" type="checkbox" />
+    </div>
+    <div class="row"><label>Contrast</label>
+      <input id="ui-contrast" type="range" min="-1" max="1" step="0.01" />
+      <div class="val" id="ui-contrast-val"></div>
+    </div>
+    <div class="row"><label>Brightness</label>
+      <input id="ui-bright" type="range" min="-1" max="1" step="0.01" />
+      <div class="val" id="ui-bright-val"></div>
+    </div>
+    <div class="row"><label>Hue/Saturation</label>
+      <input id="ui-hs" type="checkbox" />
+    </div>
+    <div class="row"><label>Saturation</label>
+      <input id="ui-sat" type="range" min="-1" max="1" step="0.01" />
+      <div class="val" id="ui-sat-val"></div>
+    </div>
+    <div class="row"><label>Hue</label>
+      <input id="ui-hue" type="range" min="-1" max="1" step="0.01" />
+      <div class="val" id="ui-hue-val"></div>
+    </div>
+    <div class="row"><label>FXAA</label>
+      <input id="ui-fxaa" type="checkbox" />
+    </div>
+    <hr />
+    <div class="subtle">Tip: keyboard shortcuts still work.</div>
+  </div>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
