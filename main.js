@@ -86,6 +86,7 @@ const grid = new THREE.GridHelper(10, 10);
 grid.material.transparent = true;
 grid.material.opacity = 0.12;
 scene.add(grid);
+grid.visible = false;
 
 // initialize composer after scene/camera exist
 initPost();
@@ -105,9 +106,17 @@ function setupUI() {
     panel.addEventListener(ev, (e) => e.stopPropagation());
   });
 
+  const updateToggleLabel = () => {
+    const open = !panel.classList.contains('hidden');
+    toggleBtn.textContent = open ? 'Close Controls' : 'Open Controls';
+    toggleBtn.setAttribute('aria-expanded', String(open));
+  };
   toggleBtn.addEventListener('click', () => {
     panel.classList.toggle('hidden');
+    updateToggleLabel();
   });
+  // Ensure initial label matches initial state
+  updateToggleLabel();
 
   // Grab elements
   const el = {
