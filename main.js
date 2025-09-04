@@ -120,6 +120,7 @@ function setupUI() {
 
   // Grab elements
   const el = {
+    modelBtn: $('ui-model-btn'),
     density: $('ui-density'), psize: $('ui-psize'), worldsize: $('ui-worldsize'), atten: $('ui-atten'), grid: $('ui-grid'),
     scatter: $('ui-scatter'),
     windEnabled: $('ui-wind-enabled'), windAmp: $('ui-wind-amp'), windFreq: $('ui-wind-freq'), windSpatial: $('ui-wind-spatial'),
@@ -131,6 +132,7 @@ function setupUI() {
   // Helpers
   function refreshUI() {
     // Points
+    if (el.modelBtn) { try { el.modelBtn.textContent = (models[modelIndex] || '').split('/').pop(); } catch {} }
     if (el.density) { el.density.value = String(keepRatio); setVal('ui-density-val', Number(keepRatio).toFixed(2)); }
     if (el.psize)   { el.psize.value = String(pointSizePx); setVal('ui-psize-val', Number(pointSizePx).toFixed(2)); }
     if (el.grid)    { el.grid.checked = !!grid.visible; }
@@ -170,6 +172,13 @@ function setupUI() {
   window.addEventListener('ui-refresh', refreshUI);
 
   // Wiring events
+  el.modelBtn?.addEventListener('click', () => {
+    modelIndex = (modelIndex + 1) % models.length;
+    const path = models[modelIndex];
+    el.modelBtn.textContent = path.split('/').pop();
+    loadModel(path);
+  });
+
   el.density?.addEventListener('input', () => {
     keepRatio = Math.max(0.02, Math.min(1, Number(el.density.value)));
     setVal('ui-density-val', keepRatio.toFixed(2));
@@ -488,63 +497,86 @@ function buildPoints() {
   }
 }
 
+// Available models and current index
+const models = [
+  'point/tree-bush.ply',
+  'point/tree-stump-2.ply',
+  'point/room.ply',
+];
+let modelIndex = 0;
+
+function loadModel(path) {
+  console.log('[PLY] loading:', path);
   loader.load(
-    'point/tree-bush.ply', // << ensure path/filename/case match your file
+    path,
     (geom) => {
-    // recentre to origin
-    geom.computeBoundingBox();
-    const bb = geom.boundingBox;
-    const cx = (bb.min.x + bb.max.x) / 2;
-    const cy = (bb.min.y + bb.max.y) / 2;
-    const cz = (bb.min.z + bb.max.z) / 2;
-    geom.translate(-cx, -cy, -cz);
+      // recentre to origin
+      geom.computeBoundingBox();
+      const bb = geom.boundingBox;
+      const cx = (bb.min.x + bb.max.x) / 2;
+      const cy = (bb.min.y + bb.max.y) / 2;
+      const cz = (bb.min.z + bb.max.z) / 2;
+      geom.translate(-cx, -cy, -cz);
 
-    // normalize scale to ~2 world units
-    const maxDim = Math.max(bb.max.x - bb.min.x, bb.max.y - bb.min.y, bb.max.z - bb.min.z) || 1;
-    const scale = 2 / maxDim;
-    geom.scale(scale, scale, scale);
+      // normalize scale to ~2 world units
+      const maxDim = Math.max(
+        bb.max.x - bb.min.x,
+        bb.max.y - bb.min.y,
+        bb.max.z - bb.min.z
+      ) || 1;
+      const scale = 2 / maxDim;
+      geom.scale(scale, scale, scale);
 
-    // rotate model 30 degrees to the left (counterclockwise around Y)
-    geom.rotateY(THREE.MathUtils.degToRad(30));
+      // rotate model 30 degrees to the left (counterclockwise around Y)
+      geom.rotateY(THREE.MathUtils.degToRad(30));
 
-    originalGeom = geom;
-    buildPoints(); // initial draw
+      originalGeom = geom;
+      buildPoints(); // initial draw
 
-    // frame camera to points
-    const box = new THREE.Box3().setFromObject(points);
-    const size = new THREE.Vector3(), center = new THREE.Vector3();
-    box.getSize(size); box.getCenter(center);
-    const md = Math.max(size.x, size.y, size.z) || 1;
-    // Slightly closer framing (was * 1.6)
-    const dist = (md / 2) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.2;
-    camera.position.copy(center).add(new THREE.Vector3(0, 0, dist));
-    camera.near = Math.max(dist / 1e5, 0.01);
-    camera.far = dist * 1e5;
-    camera.updateProjectionMatrix();
-    controls.target.copy(center);
-    controls.update();
+      // frame camera to points
+      const box = new THREE.Box3().setFromObject(points);
+      const size = new THREE.Vector3(), center = new THREE.Vector3();
+      box.getSize(size); box.getCenter(center);
+      const md = Math.max(size.x, size.y, size.z) || 1;
+      const dist = (md / 2) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.2;
+      camera.position.copy(center).add(new THREE.Vector3(0, 0, dist));
+      camera.near = Math.max(dist / 1e5, 0.01);
+      camera.far = dist * 1e5;
+      camera.updateProjectionMatrix();
+      controls.target.copy(center);
+      controls.update();
 
-    // Set size attenuation reference distance to the framing distance
-    if (points && points.material && points.material.uniforms) {
-      const u = points.material.uniforms;
-      u.uSizeAttenRef.value = dist;
-      // Update projection scale for world-size conversion
-      u.uPxPerUnit.value = innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5)));
-      // Choose world size so initial pixel size matches current base size at dist
-      if (u.uUseWorldSize.value > 0.5) {
-        u.uWorldSize.value = Math.max(1e-5, pointSizePx * dist / u.uPxPerUnit.value);
+      // Set size attenuation reference distance to the framing distance
+      if (points && points.material && points.material.uniforms) {
+        const u = points.material.uniforms;
+        u.uSizeAttenRef.value = dist;
+        // Update projection scale for world-size conversion
+        u.uPxPerUnit.value = innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5)));
+        // Choose world size so initial pixel size matches current base size at dist
+        if (u.uUseWorldSize.value > 0.5) {
+          u.uWorldSize.value = Math.max(1e-5, pointSizePx * dist / u.uPxPerUnit.value);
+        }
       }
-    }
 
-    console.log('[PLY] points:', geom.getAttribute('position')?.count ?? 0,
-                'hasColor:', !!geom.getAttribute('color'));
-    console.log(`[viewer] keepRatio=${keepRatio}, pointSizePx=${pointSizePx}`);
-    // Ask UI to sync with current material uniforms
-    try { window.dispatchEvent(new Event('ui-refresh')); } catch {}
-  },
-  undefined,
-  (err) => console.error('PLY load error:', err)
-);
+      console.log('[PLY] points:', geom.getAttribute('position')?.count ?? 0,
+                  'hasColor:', !!geom.getAttribute('color'));
+      console.log(`[viewer] keepRatio=${keepRatio}, pointSizePx=${pointSizePx}`);
+      // Ask UI to sync with current material uniforms
+      try { window.dispatchEvent(new Event('ui-refresh')); } catch {}
+
+      // Update the model button text if present
+      try {
+        const btn = document.getElementById('ui-model-btn');
+        if (btn) btn.textContent = path.split('/').pop();
+      } catch {}
+    },
+    undefined,
+    (err) => console.error('PLY load error:', err)
+  );
+}
+
+// Initial model
+loadModel(models[modelIndex]);
 
 /* ---------------- Hotkeys to tune live ----------------
    - / =  → density down/up
