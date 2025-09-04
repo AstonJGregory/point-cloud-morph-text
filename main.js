@@ -504,6 +504,9 @@ function buildPoints() {
     const scale = 2 / maxDim;
     geom.scale(scale, scale, scale);
 
+    // rotate model 30 degrees to the left (counterclockwise around Y)
+    geom.rotateY(THREE.MathUtils.degToRad(30));
+
     originalGeom = geom;
     buildPoints(); // initial draw
 
@@ -512,7 +515,8 @@ function buildPoints() {
     const size = new THREE.Vector3(), center = new THREE.Vector3();
     box.getSize(size); box.getCenter(center);
     const md = Math.max(size.x, size.y, size.z) || 1;
-    const dist = (md / 2) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.6;
+    // Slightly closer framing (was * 1.6)
+    const dist = (md / 2) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.2;
     camera.position.copy(center).add(new THREE.Vector3(0, 0, dist));
     camera.near = Math.max(dist / 1e5, 0.01);
     camera.far = dist * 1e5;
