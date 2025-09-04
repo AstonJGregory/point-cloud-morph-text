@@ -23,7 +23,66 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.body.appendChild(renderer.domElement);
 
 /* ---------------- Postprocessing (Composer + Passes) ---------------- */
-let composer, renderPass, fxaaPass, bcPass, hsPass, vignettePass, bloomPass;
+let composer, renderPass, fxaaPass, bcPass, hsPass, vignettePass, bloomPass, edgeBlurPass;
+
+// Simple radial edge blur shader (blur increases toward screen edges)
+const EdgeBlurShader = {
+  uniforms: {
+    tDiffuse:   { value: null },
+    resolution: { value: new THREE.Vector2(innerWidth, innerHeight) },
+    maxRadius:  { value: 8.0 },   // pixels at the very edge
+    falloff:    { value: 1.6 },   // higher = blur starts closer to edge
+    strength:   { value: 1.0 },   // mix amount of blur
+    center:     { value: new THREE.Vector2(0.5, 0.5) },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4( position, 1.0 );
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform vec2  resolution;
+    uniform float maxRadius;
+    uniform float falloff;
+    uniform float strength;
+    uniform vec2  center;
+    varying vec2  vUv;
+
+    // 8-tap kernel (cross + diagonals)
+    vec4 sampleBlur(vec2 uv, float radiusPx) {
+      vec2 texel = radiusPx / resolution;
+      vec4 c = texture2D(tDiffuse, uv) * 0.227027; // center weight (approx gaussian)
+      c += texture2D(tDiffuse, uv + vec2(texel.x, 0.0)) * 0.1945946;
+      c += texture2D(tDiffuse, uv - vec2(texel.x, 0.0)) * 0.1945946;
+      c += texture2D(tDiffuse, uv + vec2(0.0, texel.y)) * 0.1216216;
+      c += texture2D(tDiffuse, uv - vec2(0.0, texel.y)) * 0.1216216;
+      // light diagonal contribution
+      c += texture2D(tDiffuse, uv + vec2(texel.x, texel.y)) * 0.0702703;
+      c += texture2D(tDiffuse, uv + vec2(-texel.x, texel.y)) * 0.0702703;
+      c += texture2D(tDiffuse, uv + vec2(texel.x, -texel.y)) * 0.0702703;
+      c += texture2D(tDiffuse, uv + vec2(-texel.x, -texel.y)) * 0.0702703;
+      return c;
+    }
+
+    void main() {
+      vec2 uv = vUv;
+      // aspect-corrected distance from center
+      vec2 d = uv - center;
+      d.x *= resolution.x / resolution.y;
+      float dist = length(d);              // 0 at center
+      float edge = clamp(dist * 2.0, 0.0, 1.0); // ~1 near edges
+      float mask = pow(edge, falloff);
+
+      float radius = mask * maxRadius;
+      vec4 sharp = texture2D(tDiffuse, uv);
+      vec4 blurred = sampleBlur(uv, radius);
+      gl_FragColor = mix(sharp, blurred, strength * mask);
+    }
+  `
+};
 
 function initPost() {
   composer = new EffectComposer(renderer);
@@ -33,6 +92,7 @@ function initPost() {
   bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.6, 0.4, 0.95);
   bloomPass.enabled = false;
   composer.addPass(bloomPass);
+
 
   bcPass = new ShaderPass(BrightnessContrastShader);
   bcPass.material.uniforms.brightness.value = 0.0; // -1..1
@@ -52,6 +112,11 @@ function initPost() {
   vignettePass.enabled = false;
   composer.addPass(vignettePass);
 
+  // Edge blur (disabled by default)
+  edgeBlurPass = new ShaderPass(EdgeBlurShader);
+  edgeBlurPass.enabled = false;
+  composer.addPass(edgeBlurPass);
+
   fxaaPass = new ShaderPass(FXAAShader);
   fxaaPass.enabled = false; // toggle with hotkey
   composer.addPass(fxaaPass);
@@ -63,6 +128,9 @@ function updatePostSizes() {
   if (!composer) return;
   composer.setSize(innerWidth, innerHeight);
   if (bloomPass) bloomPass.setSize(innerWidth, innerHeight);
+  if (edgeBlurPass?.material?.uniforms?.resolution) {
+    edgeBlurPass.material.uniforms.resolution.value.set(innerWidth, innerHeight);
+  }
   if (fxaaPass) {
     const px = Math.min(devicePixelRatio, 1.5);
     fxaaPass.material.uniforms[ 'resolution' ].value.set(1 / (innerWidth * px), 1 / (innerHeight * px));
@@ -72,6 +140,18 @@ function updatePostSizes() {
 /* ---------------- Scene & Camera ---------------- */
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0);
+let fogEnabled = false;
+let fogDensity = 0.12; // thicker default
+function updateFog() {
+  // Use custom shader fog; do not use Three.js scene.fog to avoid uniform mismatch
+  const u = points?.material?.uniforms;
+  if (u) {
+    u.uFogEnabled.value = fogEnabled ? 1.0 : 0.0;
+    u.uFogDensity.value = fogDensity;
+    const c = scene.background;
+    if (c && u.uFogColor) u.uFogColor.value.set(c.r, c.g, c.b);
+  }
+}
 
 const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.01, 1e7);
 camera.position.set(0, 0, 2);
@@ -125,6 +205,9 @@ function setupUI() {
     scatter: $('ui-scatter'),
     windEnabled: $('ui-wind-enabled'), windAmp: $('ui-wind-amp'), windFreq: $('ui-wind-freq'), windSpatial: $('ui-wind-spatial'),
     waveLength: $('ui-wave-length'), waveSpeed: $('ui-wave-speed'), waveWidth: $('ui-wave-width'), waveGamma: $('ui-wave-gamma'),
+    edgeBlur: $('ui-edgeblur'), edgeBlurAmt: $('ui-edgeblur-amt'),
+    fog: $('ui-fog'), fogDensity: $('ui-fog-density'),
+    bg: $('ui-bg'),
     bloom: $('ui-bloom'), bloomStrength: $('ui-bloom-strength'), vignette: $('ui-vignette'), vignetteDark: $('ui-vignette-dark'),
     bc: $('ui-bc'), contrast: $('ui-contrast'), bright: $('ui-bright'), hs: $('ui-hs'), sat: $('ui-sat'), hue: $('ui-hue'), fxaa: $('ui-fxaa'),
   };
@@ -154,7 +237,24 @@ function setupUI() {
       if (el.waveGamma) { el.waveGamma.value = String(u.uBandGamma.value);  setVal('ui-wave-gamma-val', u.uBandGamma.value.toFixed(2)); }
     }
 
+    // Fog
+    if (el.fog) el.fog.checked = fogEnabled;
+    if (el.fogDensity) { el.fogDensity.value = String(fogDensity); setVal('ui-fog-density-val', fogDensity.toFixed(3)); }
+    if (el.bg) {
+      try {
+        const hex = '#' + scene.background.getHexString();
+        el.bg.value = hex;
+        setVal('ui-bg-val', hex.toUpperCase());
+      } catch {}
+    }
+
     // Post FX
+    if (el.edgeBlur) { el.edgeBlur.checked = !!edgeBlurPass?.enabled; }
+    if (el.edgeBlurAmt) {
+      const v = edgeBlurPass?.material?.uniforms?.maxRadius?.value ?? 8.0;
+      el.edgeBlurAmt.value = String(v);
+      setVal('ui-edgeblur-amt-val', Number(v).toFixed(1));
+    }
     if (el.bloom) { el.bloom.checked = !!bloomPass?.enabled; }
     if (el.bloomStrength) { const v = bloomPass?.strength ?? 0.6; el.bloomStrength.value = String(v); setVal('ui-bloom-strength-val', v.toFixed(2)); }
     if (el.vignette) { el.vignette.checked = !!vignettePass?.enabled; }
@@ -232,7 +332,31 @@ function setupUI() {
   el.waveWidth?.addEventListener('input', () => { const u = getU(); if (!u) return; u.uWaveWidth.value = Number(el.waveWidth.value); setVal('ui-wave-width-val', u.uWaveWidth.value.toFixed(2)); });
   el.waveGamma?.addEventListener('input', () => { const u = getU(); if (!u) return; u.uBandGamma.value = Number(el.waveGamma.value); setVal('ui-wave-gamma-val', u.uBandGamma.value.toFixed(2)); });
 
+  // Fog
+  el.fog?.addEventListener('change', () => { fogEnabled = !!el.fog.checked; updateFog(); });
+  el.fogDensity?.addEventListener('input', () => {
+    fogDensity = Math.max(0, Math.min(2.0, Number(el.fogDensity.value)));
+    updateFog();
+    setVal('ui-fog-density-val', fogDensity.toFixed(3));
+  });
+  el.bg?.addEventListener('input', () => {
+    try {
+      const hex = el.bg.value || '#000000';
+      scene.background.set(hex);
+      setVal('ui-bg-val', hex.toUpperCase());
+      updateFog();
+    } catch (e) {
+      console.warn('Invalid color:', e);
+    }
+  });
+
   // Post FX
+  el.edgeBlur?.addEventListener('change', () => { if (edgeBlurPass) edgeBlurPass.enabled = el.edgeBlur.checked; });
+  el.edgeBlurAmt?.addEventListener('input', () => {
+    if (!edgeBlurPass) return; const v = Number(el.edgeBlurAmt.value);
+    if (edgeBlurPass.material?.uniforms?.maxRadius) edgeBlurPass.material.uniforms.maxRadius.value = v;
+    setVal('ui-edgeblur-amt-val', v.toFixed(1));
+  });
   el.bloom?.addEventListener('change', () => { if (bloomPass) bloomPass.enabled = el.bloom.checked; });
   el.bloomStrength?.addEventListener('input', () => { if (!bloomPass) return; bloomPass.strength = Number(el.bloomStrength.value); setVal('ui-bloom-strength-val', bloomPass.strength.toFixed(2)); });
   el.vignette?.addEventListener('change', () => { if (vignettePass) vignettePass.enabled = el.vignette.checked; });
@@ -325,6 +449,11 @@ function makeGlowMaterial(hasVertexColor, baseSizePx = 3.0) {
     uWindFreq:    { value: 0.8 },   // temporal frequency (Hz)
     uWindSpatial: { value: 1.5 },   // spatial frequency along x/z
     uWindEnabled: { value: 1.0 },   // 1 = on, 0 = off
+
+    // --- custom fog uniforms ---
+    uFogEnabled: { value: fogEnabled ? 1.0 : 0.0 },
+    uFogDensity: { value: fogDensity },
+    uFogColor:   { value: new THREE.Color(scene.background) },
   };
 
   const vertexShader = `
@@ -356,6 +485,7 @@ function makeGlowMaterial(hasVertexColor, baseSizePx = 3.0) {
     uniform float uWindEnabled;
     varying vec3  vColor;
     varying float vPulse;
+    varying float vViewZ;
 
     void main() {
       // Start from local position
@@ -414,6 +544,7 @@ function makeGlowMaterial(hasVertexColor, baseSizePx = 3.0) {
       sizePx *= scatterScale;
       gl_PointSize = sizePx * uDPR;
       vColor = color; // will be (0,0,0) if no vertex colors bound
+      vViewZ = dist;
       gl_Position = projectionMatrix * mvPosition;
     }
   `;
@@ -425,9 +556,13 @@ uniform vec3  uColor;
 uniform float uGlowBoost;
 uniform float uUseVertexColor;
 uniform float uScatterAmp;
+uniform float uFogEnabled;
+uniform float uFogDensity;
+uniform vec3  uFogColor;
 
 varying vec3  vColor;
 varying float vPulse;
+varying float vViewZ;
 
 void main() {
   // Circular points
@@ -440,6 +575,14 @@ void main() {
 
   // Keep points fully opaque; size is controlled in vertex
   float alpha = 1.0;
+
+  // Exponential squared fog based on view-space depth (approx via gl_FragCoord)
+  // We approximate view depth using gl_FragCoord.z in [0,1] mapped by density scalar.
+  // For point sprites, this is sufficient for a soft atmospheric effect.
+  if (uFogEnabled > 0.5) {
+    float f = 1.0 - exp(-pow(uFogDensity * vViewZ, 2.0));
+    col = mix(col, uFogColor, clamp(f, 0.0, 1.0));
+  }
 
   gl_FragColor = vec4(col, alpha);
 }
@@ -495,6 +638,8 @@ function buildPoints() {
       u.uWorldSize.value = Math.max(1e-5, pointSizePx * refDist / pxPerUnit);
     }
   }
+  // Sync fog uniforms to current settings
+  updateFog();
 }
 
 // Available models and current index
@@ -577,6 +722,7 @@ function loadModel(path) {
 
 // Initial model
 loadModel(models[modelIndex]);
+updateFog();
 
 /* ---------------- Hotkeys to tune live ----------------
    - / =  → density down/up
