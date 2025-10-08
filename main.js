@@ -6,10 +6,12 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { LUTPass } from 'three/addons/postprocessing/LUTPass.js';
 import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
 import { BrightnessContrastShader } from 'three/addons/shaders/BrightnessContrastShader.js';
 import { HueSaturationShader } from 'three/addons/shaders/HueSaturationShader.js';
 import { VignetteShader } from 'three/addons/shaders/VignetteShader.js';
+import { LUTCubeLoader } from 'three/addons/loaders/LUTCubeLoader.js';
 
 /* ---------------- Renderer ---------------- */
 const renderer = new THREE.WebGLRenderer({
@@ -23,7 +25,18 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.body.appendChild(renderer.domElement);
 
 /* ---------------- Postprocessing (Composer + Passes) ---------------- */
-let composer, renderPass, fxaaPass, bcPass, hsPass, vignettePass, bloomPass, edgeBlurPass;
+let composer, renderPass, fxaaPass, bcPass, hsPass, vignettePass, bloomPass, edgeBlurPass, lutPass;
+const lutLoader = new LUTCubeLoader();
+const LUT_PRESETS = {
+  warm: { label: 'Warm Glow', path: 'luts/warm.cube' },
+  green: { label: 'Green Lift', path: 'luts/LUT_green.cube' },
+  mutedUrban: { label: 'Muted Urban', path: 'luts/LUT_muted-urban.cube' },
+  forest: { label: 'Forest Boost', path: 'luts/LUT_forest.cube' },
+  latest: { label: 'Latest LUT', path: 'luts/LUT_PRESETSSTORE.cube' },
+};
+let activeLutKey = 'none';
+let lutLoadMap = new Map(); // cache of loaded LUT textures
+let lutIntensity = 1.0;
 
 // Simple radial edge blur shader (blur increases toward screen edges)
 const EdgeBlurShader = {
@@ -121,7 +134,68 @@ function initPost() {
   fxaaPass.enabled = false; // toggle with hotkey
   composer.addPass(fxaaPass);
 
+  lutPass = new LUTPass();
+  lutPass.enabled = false;
+  lutPass.intensity = 1.0;
+  composer.addPass(lutPass);
+
   updatePostSizes();
+
+  updateLutPass();
+}
+
+function updateLutPass() {
+  if (!lutPass) return;
+  lutPass.intensity = lutIntensity;
+  const enabled = activeLutKey !== 'none' && lutPass.lut && lutIntensity > 0.0;
+  lutPass.enabled = enabled;
+}
+
+function setLutPreset(key) {
+  if (!lutPass) {
+    activeLutKey = key;
+    return;
+  }
+
+  const normalized = LUT_PRESETS[key] ? key : 'none';
+  activeLutKey = normalized;
+
+  if (normalized === 'none') {
+    lutPass.lut = null;
+    updateLutPass();
+    return;
+  }
+
+  const preset = LUT_PRESETS[normalized];
+  const { path } = preset;
+  const cached = lutLoadMap.get(path);
+  if (cached) {
+    lutPass.lut = cached;
+    updateLutPass();
+    return;
+  }
+
+  lutLoader.load(
+    path,
+    (result) => {
+      const tex = result.texture3D;
+      lutLoadMap.set(path, tex);
+      if (activeLutKey === normalized) {
+        lutPass.lut = tex;
+        updateLutPass();
+      }
+    },
+    undefined,
+    (err) => {
+      console.error('[LUT] failed to load', path, err);
+      if (activeLutKey === normalized) {
+        activeLutKey = 'none';
+        lutPass.lut = null;
+        updateLutPass();
+        try { window.dispatchEvent(new Event('ui-refresh')); } catch {}
+      }
+    }
+  );
 }
 
 function updatePostSizes() {
@@ -146,6 +220,7 @@ function updateFog() {
   // Use custom shader fog; do not use Three.js scene.fog to avoid uniform mismatch
   const u = points?.material?.uniforms;
   if (u) {
+      if (u.uSquareMix) squareMix = u.uSquareMix.value ?? squareMix;
     u.uFogEnabled.value = fogEnabled ? 1.0 : 0.0;
     u.uFogDensity.value = fogDensity;
     const c = scene.background;
@@ -159,6 +234,8 @@ camera.position.set(0, 0, 2);
 /* ---------------- Controls ---------------- */
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
+controls.enableZoom = false;
+renderer.domElement.addEventListener('wheel', handleWheelForMorph, { passive: false });
 
 /* ---------------- Helpers (optional) ---------------- */
 scene.add(new THREE.AmbientLight(0xffffff, 0.9));
@@ -167,6 +244,116 @@ grid.material.transparent = true;
 grid.material.opacity = 0.12;
 scene.add(grid);
 grid.visible = false;
+
+/* ---------------- Background Text ---------------- */
+const BG_TEXT_OFFSET = 1.6; // distance behind the model, along the view axis
+const BG_TEXT_VIEWPORT_FRACTION = 0.78; // portion of the view width to cover
+const BG_TEXT_CANVAS_WIDTH = 2048;
+const BG_TEXT_CANVAS_HEIGHT = 1024;
+const BG_TEXT_BASE_FONT_SIZE = 360;
+const BG_TEXT_MIN_FONT_SIZE = 80;
+const BG_TEXT_MAX_WIDTH_RATIO = 0.88;
+const BG_TEXT_FONT_FAMILY = 'Helvetica, "Helvetica Neue", Arial, sans-serif';
+let bgTextFill = '#ffffff';
+
+let bgTextLabel = 'POINT CLOUDS';
+let bgTextMesh = null;
+let bgTextAspect = BG_TEXT_CANVAS_WIDTH / BG_TEXT_CANVAS_HEIGHT;
+let bgTextCanvas = null;
+let bgTextCtx = null;
+let bgTextTexture = null;
+const _bgTempDir = new THREE.Vector3();
+
+function updateBackgroundTextTexture() {
+  if (!bgTextCtx || !bgTextCanvas || !bgTextTexture) return;
+
+  const width = bgTextCanvas.width;
+  const height = bgTextCanvas.height;
+  bgTextCtx.clearRect(0, 0, width, height);
+
+  const label = bgTextLabel.trim();
+  const hasLabel = label.length > 0;
+  if (bgTextMesh) bgTextMesh.visible = hasLabel;
+  if (!hasLabel) {
+    bgTextTexture.needsUpdate = true;
+    return;
+  }
+
+  bgTextCtx.textAlign = 'center';
+  bgTextCtx.textBaseline = 'middle';
+  const maxWidth = width * BG_TEXT_MAX_WIDTH_RATIO;
+  const composeFont = (sizePx) => `900 ${sizePx}px ${BG_TEXT_FONT_FAMILY}`;
+
+  let fontSize = BG_TEXT_BASE_FONT_SIZE;
+  bgTextCtx.font = composeFont(fontSize);
+  let metrics = bgTextCtx.measureText(label);
+  if (metrics.width > maxWidth) {
+    const scale = maxWidth / Math.max(metrics.width, 1);
+    fontSize = Math.max(BG_TEXT_MIN_FONT_SIZE, fontSize * scale);
+    bgTextCtx.font = composeFont(fontSize);
+    metrics = bgTextCtx.measureText(label);
+  }
+
+  bgTextCtx.fillStyle = bgTextFill || '#ffffff';
+  bgTextCtx.fillText(label, width * 0.5, height * 0.5);
+  bgTextTexture.needsUpdate = true;
+}
+
+function buildBackgroundText() {
+  bgTextCanvas = document.createElement('canvas');
+  bgTextCanvas.width = BG_TEXT_CANVAS_WIDTH;
+  bgTextCanvas.height = BG_TEXT_CANVAS_HEIGHT;
+  bgTextCtx = bgTextCanvas.getContext('2d');
+  if (!bgTextCtx) {
+    console.warn('[background-text] 2D context unavailable');
+    return;
+  }
+
+  bgTextTexture = new THREE.CanvasTexture(bgTextCanvas);
+  bgTextTexture.colorSpace = THREE.SRGBColorSpace;
+  bgTextTexture.anisotropy = renderer.capabilities?.getMaxAnisotropy
+    ? renderer.capabilities.getMaxAnisotropy()
+    : 1;
+  bgTextTexture.needsUpdate = true;
+
+  const material = new THREE.MeshBasicMaterial({
+    map: bgTextTexture,
+    transparent: true,
+    depthWrite: false,
+  });
+
+  const geometry = new THREE.PlaneGeometry(1, 1);
+  bgTextMesh = new THREE.Mesh(geometry, material);
+  bgTextMesh.name = 'BackgroundText';
+  bgTextAspect = BG_TEXT_CANVAS_WIDTH / BG_TEXT_CANVAS_HEIGHT;
+  scene.add(bgTextMesh);
+  updateBackgroundTextTexture();
+  updateBackgroundTextScale();
+  updateBackgroundTextPose();
+}
+
+function updateBackgroundTextScale() {
+  if (!bgTextMesh) return;
+  const target = controls.target;
+  const camDist = camera.position.distanceTo(target);
+  const planeDist = camDist + BG_TEXT_OFFSET;
+  const viewHeight = 2 * planeDist * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5));
+  const targetWidth = viewHeight * camera.aspect * BG_TEXT_VIEWPORT_FRACTION;
+  const targetHeight = targetWidth / bgTextAspect;
+  bgTextMesh.scale.set(targetWidth, targetHeight, 1);
+}
+
+function updateBackgroundTextPose() {
+  if (!bgTextMesh) return;
+  const target = controls.target;
+  _bgTempDir.subVectors(camera.position, target);
+  if (_bgTempDir.lengthSq() < 1e-6) return;
+  _bgTempDir.normalize().multiplyScalar(BG_TEXT_OFFSET);
+  bgTextMesh.position.copy(target).sub(_bgTempDir);
+  bgTextMesh.lookAt(camera.position);
+}
+
+buildBackgroundText();
 
 // initialize composer after scene/camera exist
 initPost();
@@ -180,6 +367,9 @@ function setupUI() {
 
   const setVal = (id, v, fmt) => { const el = $(id); if (el) el.textContent = fmt ? fmt(v) : String(v); };
   const getU = () => points?.material?.uniforms;
+  const updateGlowUIState = () => {
+    if (el.randomSpeed) el.randomSpeed.disabled = glowMode !== 'random';
+  };
 
   // Prevent UI interactions from moving the camera
   ['wheel','pointerdown','touchstart','keydown'].forEach(ev => {
@@ -202,14 +392,20 @@ function setupUI() {
   const el = {
     modelBtn: $('ui-model-btn'),
     density: $('ui-density'), psize: $('ui-psize'), worldsize: $('ui-worldsize'), atten: $('ui-atten'), grid: $('ui-grid'),
-    scatter: $('ui-scatter'),
+    scatter: $('ui-scatter'), square: $('ui-square'),
+    glowMode: $('ui-glow-mode'),
+    randomSpeed: $('ui-random-speed'),
     windEnabled: $('ui-wind-enabled'), windAmp: $('ui-wind-amp'), windFreq: $('ui-wind-freq'), windSpatial: $('ui-wind-spatial'),
     waveLength: $('ui-wave-length'), waveSpeed: $('ui-wave-speed'), waveWidth: $('ui-wave-width'), waveGamma: $('ui-wave-gamma'),
     edgeBlur: $('ui-edgeblur'), edgeBlurAmt: $('ui-edgeblur-amt'),
     fog: $('ui-fog'), fogDensity: $('ui-fog-density'),
     bg: $('ui-bg'),
+    bgText: $('ui-bg-text'),
+    bgTextColor: $('ui-bg-text-color'),
     bloom: $('ui-bloom'), bloomStrength: $('ui-bloom-strength'), vignette: $('ui-vignette'), vignetteDark: $('ui-vignette-dark'),
-    bc: $('ui-bc'), contrast: $('ui-contrast'), bright: $('ui-bright'), hs: $('ui-hs'), sat: $('ui-sat'), hue: $('ui-hue'), fxaa: $('ui-fxaa'),
+    bc: $('ui-bc'), contrast: $('ui-contrast'), bright: $('ui-bright'), hs: $('ui-hs'), sat: $('ui-sat'), hue: $('ui-hue'),
+    lut: $('ui-lut'), lutIntensity: $('ui-lut-intensity'),
+    fxaa: $('ui-fxaa'),
   };
 
   // Helpers
@@ -225,6 +421,22 @@ function setupUI() {
       if (el.worldsize) el.worldsize.checked = u.uUseWorldSize.value > 0.5;
       if (el.atten)     el.atten.checked     = u.uSizeAttenEnabled.value > 0.5;
       if (el.scatter)   { el.scatter.value = String(u.uScatterAmp.value ?? scatterAmp); setVal('ui-scatter-val', (u.uScatterAmp.value ?? scatterAmp).toFixed(3)); }
+      if (el.square) {
+        if (u.uSquareMix) squareMix = u.uSquareMix.value ?? squareMix;
+        el.square.value = String(squareMix);
+        setVal('ui-square-val', (squareMix * 100).toFixed(0) + '%');
+      }
+      if (el.glowMode) {
+        const mode = (u.uGlowMode?.value ?? (glowMode === 'random' ? 1 : 0)) >= 0.5 ? 'random' : 'wave';
+        glowMode = mode;
+        el.glowMode.value = mode;
+      }
+      if (el.randomSpeed && u.uRandomGlowSpeed) {
+        const v = u.uRandomGlowSpeed.value ?? randomGlowSpeed;
+        randomGlowSpeed = v;
+        el.randomSpeed.value = String(v);
+        setVal('ui-random-speed-val', v.toFixed(1));
+      }
       // no base color controls in UI
       if (el.windEnabled) el.windEnabled.checked = u.uWindEnabled.value > 0.5;
       if (el.windAmp)   { el.windAmp.value   = String(u.uWindAmp.value);   setVal('ui-wind-amp-val', u.uWindAmp.value.toFixed(3)); }
@@ -236,6 +448,18 @@ function setupUI() {
       if (el.waveWidth) { el.waveWidth.value = String(u.uWaveWidth.value);  setVal('ui-wave-width-val', u.uWaveWidth.value.toFixed(2)); }
       if (el.waveGamma) { el.waveGamma.value = String(u.uBandGamma.value);  setVal('ui-wave-gamma-val', u.uBandGamma.value.toFixed(2)); }
     }
+    else {
+      if (el.square) { el.square.value = String(squareMix); setVal('ui-square-val', (squareMix * 100).toFixed(0) + '%'); }
+      if (el.glowMode) {
+        el.glowMode.value = glowMode;
+      }
+      if (el.randomSpeed) {
+        el.randomSpeed.value = String(randomGlowSpeed);
+        setVal('ui-random-speed-val', randomGlowSpeed.toFixed(1));
+      }
+    }
+
+    updateGlowUIState();
 
     // Fog
     if (el.fog) el.fog.checked = fogEnabled;
@@ -246,6 +470,13 @@ function setupUI() {
         el.bg.value = hex;
         setVal('ui-bg-val', hex.toUpperCase());
       } catch {}
+    }
+    if (el.bgText) {
+      el.bgText.value = bgTextLabel;
+    }
+    if (el.bgTextColor) {
+      el.bgTextColor.value = bgTextFill;
+      setVal('ui-bg-text-color-val', (bgTextFill || '').toUpperCase());
     }
 
     // Post FX
@@ -265,6 +496,12 @@ function setupUI() {
     if (el.hs) { el.hs.checked = !!hsPass?.enabled; }
     if (el.sat) { const v = hsPass?.material?.uniforms?.saturation?.value ?? 0.0; el.sat.value = String(v); setVal('ui-sat-val', v.toFixed(2)); }
     if (el.hue) { const v = hsPass?.material?.uniforms?.hue?.value ?? 0.0; el.hue.value = String(v); setVal('ui-hue-val', v.toFixed(2)); }
+    if (el.lut) { el.lut.value = activeLutKey; }
+    if (el.lutIntensity) {
+      el.lutIntensity.value = String(lutIntensity);
+      el.lutIntensity.disabled = activeLutKey === 'none';
+      setVal('ui-lut-intensity-val', lutIntensity.toFixed(2));
+    }
     if (el.fxaa) { el.fxaa.checked = !!fxaaPass?.enabled; }
   }
 
@@ -318,6 +555,30 @@ function setupUI() {
     const u = getU(); if (u && u.uScatterAmp) u.uScatterAmp.value = scatterAmp;
   });
 
+  el.square?.addEventListener('input', () => {
+    squareMix = Math.max(0, Math.min(1, Number(el.square.value)));
+    setVal('ui-square-val', (squareMix * 100).toFixed(0) + '%');
+    const u = getU(); if (u?.uSquareMix) u.uSquareMix.value = squareMix;
+  });
+
+  el.glowMode?.addEventListener('change', () => {
+    glowMode = el.glowMode.value === 'random' ? 'random' : 'wave';
+    const u = getU();
+    if (u?.uGlowMode) u.uGlowMode.value = glowMode === 'random' ? 1.0 : 0.0;
+    if (el.randomSpeed) {
+      el.randomSpeed.value = String(randomGlowSpeed);
+      setVal('ui-random-speed-val', randomGlowSpeed.toFixed(1));
+    }
+    updateGlowUIState();
+  });
+
+  el.randomSpeed?.addEventListener('input', () => {
+    randomGlowSpeed = Math.max(0.1, Math.min(5, Number(el.randomSpeed.value)));
+    setVal('ui-random-speed-val', randomGlowSpeed.toFixed(1));
+    const u = getU();
+    if (u?.uRandomGlowSpeed) u.uRandomGlowSpeed.value = randomGlowSpeed;
+  });
+
   // removed RGB/vertex color handlers
 
   // Wind
@@ -349,6 +610,15 @@ function setupUI() {
       console.warn('Invalid color:', e);
     }
   });
+  el.bgText?.addEventListener('input', () => {
+    bgTextLabel = el.bgText.value ?? '';
+    updateBackgroundTextTexture();
+  });
+  el.bgTextColor?.addEventListener('input', () => {
+    bgTextFill = el.bgTextColor.value || '#ffffff';
+    setVal('ui-bg-text-color-val', (bgTextFill || '').toUpperCase());
+    updateBackgroundTextTexture();
+  });
 
   // Post FX
   el.edgeBlur?.addEventListener('change', () => { if (edgeBlurPass) edgeBlurPass.enabled = el.edgeBlur.checked; });
@@ -367,6 +637,15 @@ function setupUI() {
   el.hs?.addEventListener('change', () => { if (hsPass) hsPass.enabled = el.hs.checked; });
   el.sat?.addEventListener('input', () => { const u = hsPass?.material?.uniforms?.saturation; if (!u) return; u.value = Number(el.sat.value); setVal('ui-sat-val', u.value.toFixed(2)); });
   el.hue?.addEventListener('input', () => { const u = hsPass?.material?.uniforms?.hue; if (!u) return; u.value = Number(el.hue.value); setVal('ui-hue-val', u.value.toFixed(2)); });
+  el.lut?.addEventListener('change', () => {
+    setLutPreset(el.lut.value);
+    refreshUI();
+  });
+  el.lutIntensity?.addEventListener('input', () => {
+    lutIntensity = Math.max(0.0, Math.min(1.0, Number(el.lutIntensity.value)));
+    setVal('ui-lut-intensity-val', lutIntensity.toFixed(2));
+    updateLutPass();
+  });
   el.fxaa?.addEventListener('change', () => { if (fxaaPass) fxaaPass.enabled = el.fxaa.checked; });
 
   // Initial sync
@@ -378,38 +657,135 @@ function setupUI() {
 // (moved) UI initialization happens later after key vars are defined
 
 /* ---------------- Utilities ---------------- */
-// Subsample utility (keeps ~keepRatio of points)
-function subsampleGeometry(sourceGeom, keepRatio = 1) {
-  if (keepRatio >= 0.999) return sourceGeom;
-
+// Sample a geometry down to a specific point count, returning raw arrays.
+function sampleGeometryAttributes(sourceGeom, targetCount) {
+  if (!sourceGeom || !targetCount) return null;
   const pos = sourceGeom.getAttribute('position');
-  const col = sourceGeom.getAttribute('color'); // may be undefined
-  const count = pos.count;
+  if (!pos) return null;
 
-  const target = Math.max(1, Math.floor(count * keepRatio));
-  const stride = Math.max(1, Math.floor(count / target));
-  const kept = Math.ceil(count / stride);
+  const srcCount = pos.count;
+  const count = Math.max(1, Math.min(targetCount, srcCount));
 
-  const positions = new Float32Array(kept * 3);
-  const colors = col ? new Uint8Array(kept * 3) : null;
+  const colorAttr = sourceGeom.getAttribute('color');
+  const positions = new Float32Array(count * 3);
+  const colors = colorAttr ? new Float32Array(count * 3) : null;
 
-  let w = 0;
-  for (let i = 0; i < count; i += stride) {
-    positions[w * 3 + 0] = pos.getX(i);
-    positions[w * 3 + 1] = pos.getY(i);
-    positions[w * 3 + 2] = pos.getZ(i);
-    if (colors) {
-      colors[w * 3 + 0] = Math.round((col.getX(i) ?? 1) * 255);
-      colors[w * 3 + 1] = Math.round((col.getY(i) ?? 1) * 255);
-      colors[w * 3 + 2] = Math.round((col.getZ(i) ?? 1) * 255);
+  const step = srcCount / count;
+  let idx = 0;
+  for (let i = 0; i < count; i++) {
+    const srcIndex = Math.min(srcCount - 1, Math.floor(idx));
+    positions[i * 3 + 0] = pos.getX(srcIndex);
+    positions[i * 3 + 1] = pos.getY(srcIndex);
+    positions[i * 3 + 2] = pos.getZ(srcIndex);
+    if (colors && colorAttr) {
+      colors[i * 3 + 0] = colorAttr.getX(srcIndex);
+      colors[i * 3 + 1] = colorAttr.getY(srcIndex);
+      colors[i * 3 + 2] = colorAttr.getZ(srcIndex);
     }
-    w++;
+    idx += step;
   }
 
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  if (colors) g.setAttribute('color', new THREE.BufferAttribute(colors, 3, true)); // normalized Uint8
-  return g;
+  return { count, positions, colors };
+}
+
+function prepareGeometryForView(geom) {
+  if (!geom) return null;
+  geom.computeBoundingBox();
+  const bb = geom.boundingBox;
+  if (!bb) return geom;
+
+  const cx = (bb.min.x + bb.max.x) * 0.5;
+  const cy = (bb.min.y + bb.max.y) * 0.5;
+  const cz = (bb.min.z + bb.max.z) * 0.5;
+  geom.translate(-cx, -cy, -cz);
+
+  const maxDim = Math.max(
+    bb.max.x - bb.min.x,
+    bb.max.y - bb.min.y,
+    bb.max.z - bb.min.z
+  ) || 1;
+  const scale = 2 / maxDim;
+  geom.scale(scale, scale, scale);
+
+  geom.rotateY(THREE.MathUtils.degToRad(30));
+  geom.computeBoundingBox();
+  geom.computeBoundingSphere?.();
+  return geom;
+}
+
+function updateMorphUniform() {
+  const u = points?.material?.uniforms?.uMorph;
+  if (u) u.value = morphAmount;
+}
+
+function setMorphAmount(value) {
+  morphAmount = THREE.MathUtils.clamp(value, 0.0, 1.0);
+  updateMorphUniform();
+}
+
+function syncMorphToScroll() {
+  const doc = document.documentElement;
+  const body = document.body;
+  const scrollTop = window.scrollY || doc?.scrollTop || body?.scrollTop || 0;
+  const scrollHeight = Math.max(
+    doc?.scrollHeight ?? 0,
+    body?.scrollHeight ?? 0
+  );
+  const maxScroll = Math.max(0, scrollHeight - window.innerHeight);
+  const ratio = maxScroll > 0 ? scrollTop / maxScroll : 0;
+  setMorphAmount(ratio);
+}
+
+function handleWheelForMorph(event) {
+  if (!allowWheelMorph) return;
+  const panel = document.getElementById('ui-panel');
+  const toggle = document.getElementById('ui-toggle');
+  if ((panel && panel.contains(event.target)) || (toggle && toggle.contains(event.target))) return; // allow UI scrolling
+  if (event.target && typeof event.target.closest === 'function') {
+    if (event.target.closest('input, select, textarea')) return;
+  }
+  if (event.altKey || event.ctrlKey || event.metaKey) return; // let modifier + wheel pass through for zooming
+
+  event.preventDefault();
+  event.stopPropagation();
+  if (typeof event.stopImmediatePropagation === 'function') {
+    event.stopImmediatePropagation();
+  }
+
+  const delta = event.deltaY || 0;
+  if (!delta) return;
+  const mode = event.deltaMode || 0;
+  const baseStep = mode === 1 ? 0.04 : mode === 2 ? 1.0 : 0.0007;
+  const step = event.shiftKey ? baseStep * 3.0 : baseStep;
+  const next = morphAmount + delta * step;
+  setMorphAmount(next);
+}
+
+function loadMorphTargetGeometry(path) {
+  morphTargetGeom = null;
+  if (!path) {
+    allowWheelMorph = false;
+    setMorphAmount(0);
+    return;
+  }
+
+  loader.load(
+    path,
+    (geom) => {
+      morphTargetGeom = prepareGeometryForView(geom);
+      allowWheelMorph = true;
+      syncMorphToScroll();
+      buildPoints();
+      console.log('[PLY] morph target ready:', path);
+    },
+    undefined,
+    (err) => {
+      console.error('PLY morph target load error:', err);
+      morphTargetGeom = null;
+      allowWheelMorph = false;
+      setMorphAmount(0);
+    }
+  );
 }
 
 // Wave glow shader: a moving front that brightens/enlarges points as it passes.
@@ -422,6 +798,9 @@ function makeGlowMaterial(hasVertexColor, baseSizePx = 3.0) {
     uGlowBoost:   { value: 1.1 },        // brightness at the front
     uColor:       { value: new THREE.Color(0xffffff) },
     uUseVertexColor: { value: hasVertexColor ? 1 : 0 },
+    uMorph:       { value: 0.0 },        // 0=start, 1=target
+    uGlowMode:    { value: glowMode === 'random' ? 1.0 : 0.0 },
+    uRandomGlowSpeed: { value: randomGlowSpeed },
 
     // Size attenuation (0 = off, 1 = on). Ref distance where size is unchanged.
     uSizeAttenEnabled: { value: 0.0 },
@@ -433,6 +812,7 @@ function makeGlowMaterial(hasVertexColor, baseSizePx = 3.0) {
     uPxPerUnit:    { value: 1.0 },   // pixels per world unit (CSS px)
     // Random scatter amount (world units)
     uScatterAmp:   { value: scatterAmp },
+    uSquareMix:    { value: squareMix },
 
     // --- wave controls ---
     // We normalized your model so the largest side ≈ 2 world units.
@@ -462,6 +842,8 @@ function makeGlowMaterial(hasVertexColor, baseSizePx = 3.0) {
     uniform float uDPR;
     uniform float uBaseSize;
     uniform float uPulseAmp;
+    uniform float uGlowMode;
+    uniform float uRandomGlowSpeed;
     uniform float uSizeAttenEnabled;
     uniform float uSizeAttenRef;
     // World-size uniforms
@@ -477,6 +859,9 @@ function makeGlowMaterial(hasVertexColor, baseSizePx = 3.0) {
     uniform float uBandGamma;
 
     attribute vec3 color;
+    attribute vec3 morphPosition;
+    attribute vec3 morphColor;
+    uniform float uMorph;
     // Wind uniforms
     uniform vec3  uWindDir;
     uniform float uWindAmp;
@@ -486,23 +871,28 @@ function makeGlowMaterial(hasVertexColor, baseSizePx = 3.0) {
     varying vec3  vColor;
     varying float vPulse;
     varying float vViewZ;
+    varying float vHash;
 
     void main() {
-      // Start from local position
-      vec3 p = position;
+      float morph = clamp(uMorph, 0.0, 1.0);
+      vec3 p0 = position;
+      vec3 p1 = morphPosition;
+      vec3 p = mix(p0, p1, morph);
 
       // Height factor (0 at base, 1 at top). Model is roughly in [-1,1] Y.
       float h = clamp(p.y * 0.5 + 0.5, 0.0, 1.0);
 
       // Stable random direction per point; displace by uScatterAmp
-      float h1 = fract(sin(dot(p.xyz, vec3(127.1, 311.7,  74.7))) * 43758.5453);
-      float h2 = fract(sin(dot(p.yzx, vec3(269.5, 183.3, 246.1))) * 43758.5453);
-      float h3 = fract(sin(dot(p.zxy, vec3(113.5, 271.9, 124.6))) * 43758.5453);
+      vec3 noiseSeed = p0 + p1;
+      float h1 = fract(sin(dot(noiseSeed.xyz, vec3(127.1, 311.7,  74.7))) * 43758.5453);
+      float h2 = fract(sin(dot(noiseSeed.yzx, vec3(269.5, 183.3, 246.1))) * 43758.5453);
+      float h3 = fract(sin(dot(noiseSeed.zxy, vec3(113.5, 271.9, 124.6))) * 43758.5453);
       vec3 randDir = normalize(vec3(h1 * 2.0 - 1.0, h2 * 2.0 - 1.0, h3 * 2.0 - 1.0) + 1e-4);
       p += randDir * uScatterAmp;
 
       // Pseudo-random per-point phase for variation
-      float hash = fract(sin(dot(p.xyz, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+      float hash = fract(sin(dot(noiseSeed.xyz, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+      vHash = hash;
 
       // Time-varying wind direction (slowly rotates) blended with user dir
       vec3 rotDir = normalize(vec3(cos(uTime * 0.05), 0.0, sin(uTime * 0.05)));
@@ -528,7 +918,14 @@ function makeGlowMaterial(hasVertexColor, baseSizePx = 3.0) {
 
       // Convert to a soft band: 1 at front, 0 away from it
       float band = smoothstep(uWaveWidth, 0.0, distToFront); // thinner band -> sharper front
-      vPulse = pow(band, uBandGamma);
+      float wavePulse = pow(band, uBandGamma);
+
+      float randomPhase = uTime * uRandomGlowSpeed + hash * 6.2831853;
+      float flicker = clamp(0.5 + 0.5 * sin(randomPhase), 0.0, 1.0);
+      float randomPulse = pow(flicker, 3.0);
+
+      float modeMix = clamp(uGlowMode, 0.0, 1.0);
+      vPulse = mix(wavePulse, randomPulse, modeMix);
 
       // Point size: choose screen-space constant or world-space diameter
       vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
@@ -543,7 +940,7 @@ function makeGlowMaterial(hasVertexColor, baseSizePx = 3.0) {
       float scatterScale = clamp(1.0 - (uScatterAmp / 0.5), 0.0, 1.0);
       sizePx *= scatterScale;
       gl_PointSize = sizePx * uDPR;
-      vColor = color; // will be (0,0,0) if no vertex colors bound
+      vColor = mix(color, morphColor, morph); // (0,0,0) if no vertex colors bound
       vViewZ = dist;
       gl_Position = projectionMatrix * mvPosition;
     }
@@ -556,6 +953,7 @@ uniform vec3  uColor;
 uniform float uGlowBoost;
 uniform float uUseVertexColor;
 uniform float uScatterAmp;
+uniform float uSquareMix;
 uniform float uFogEnabled;
 uniform float uFogDensity;
 uniform vec3  uFogColor;
@@ -563,18 +961,23 @@ uniform vec3  uFogColor;
 varying vec3  vColor;
 varying float vPulse;
 varying float vViewZ;
+varying float vHash;
 
 void main() {
-  // Circular points
   vec2 uv = gl_PointCoord * 2.0 - 1.0;
+  float squareMask = step(1.0 - uSquareMix, vHash);
   float r2 = dot(uv, uv);
-  if (r2 > 1.0) discard;
+  if (squareMask < 0.5 && r2 > 1.0) discard;
+
+  float alpha = 1.0;
+  if (squareMask >= 0.5) {
+    float edge = max(abs(uv.x), abs(uv.y));
+    alpha = clamp(1.0 - smoothstep(0.96, 1.0, edge), 0.0, 1.0);
+    if (alpha <= 0.0) discard;
+  }
 
   vec3 base = mix(uColor, vColor, uUseVertexColor);
   vec3 col  = base * (1.0 + uGlowBoost * vPulse);
-
-  // Keep points fully opaque; size is controlled in vertex
-  float alpha = 1.0;
 
   // Exponential squared fog based on view-space depth (approx via gl_FragCoord)
   // We approximate view depth using gl_FragCoord.z in [0,1] mapped by density scalar.
@@ -593,7 +996,7 @@ void main() {
     vertexShader,
     fragmentShader,
     transparent: true,
-    depthWrite: false,
+    depthWrite: true,
     blending: THREE.NormalBlending,
   });
 }
@@ -604,41 +1007,102 @@ const loader = new PLYLoader();
 let originalGeom = null; // unmodified, for re-subsampling
 let points = null;       // THREE.Points instance
 
+const MORPH_PAIRS = {
+  'point/tree-bush.ply': 'point/tree-stump-2.ply',
+};
+let morphTargetGeom = null;
+let morphAmount = 0.0;
+let allowWheelMorph = false;
+
 let keepRatio = 0.18;    // ↓ fewer points for speed (try 0.10–0.25)
 let pointSizePx = 3.0;   // ↑ base point size (pixels)
 let useScreenSize = true; // kept for API parity; shader uses screen-space size
 let scatterAmp = 0.0;    // random displacement amplitude (world units)
+let glowMode = 'wave';   // 'wave' or 'random'
+let randomGlowSpeed = 1.2; // Hz for random flicker
+let squareMix = 0.0;     // 0 = circles, 1 = all squares
+
 
 function buildPoints() {
   if (!originalGeom) return;
 
-  const g = subsampleGeometry(originalGeom, keepRatio);
-  g.computeBoundingBox();
+  const basePos = originalGeom.getAttribute('position');
+  if (!basePos) return;
 
-  const hasColor = !!g.getAttribute('color');
+  const baseCount = basePos.count;
+  const baseTarget = Math.max(1, Math.floor(baseCount * keepRatio));
+
+  let finalCount = baseTarget;
+  const morphPos = morphTargetGeom?.getAttribute?.('position');
+  if (morphPos) {
+    const morphTarget = Math.max(1, Math.floor(morphPos.count * keepRatio));
+    finalCount = Math.min(baseTarget, morphTarget);
+  }
+
+  const baseSample = sampleGeometryAttributes(originalGeom, finalCount);
+  if (!baseSample) return;
+
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(baseSample.positions, 3));
+
+  const baseColorsArray = baseSample.colors ?? (() => {
+    const arr = new Float32Array(baseSample.count * 3);
+    arr.fill(1);
+    return arr;
+  })();
+  geom.setAttribute('color', new THREE.BufferAttribute(baseColorsArray, 3));
+  const hasColor = !!baseSample.colors;
+
+  let morphPositionArray = null;
+  let morphColorArray = null;
+  if (morphPos) {
+    const targetSample = sampleGeometryAttributes(morphTargetGeom, finalCount);
+    if (targetSample) {
+      morphPositionArray = targetSample.positions ?? baseSample.positions.slice();
+      morphColorArray = targetSample.colors ?? null;
+    }
+  }
+
+  if (!morphPositionArray) {
+    morphPositionArray = baseSample.positions.slice();
+  }
+  if (!morphColorArray) {
+    if (baseSample.colors) {
+      morphColorArray = baseSample.colors.slice();
+    } else {
+      morphColorArray = new Float32Array(baseSample.count * 3);
+      morphColorArray.fill(1);
+    }
+  }
+
+  geom.setAttribute('morphPosition', new THREE.BufferAttribute(morphPositionArray, 3));
+  geom.setAttribute('morphColor', new THREE.BufferAttribute(morphColorArray, 3));
+  geom.computeBoundingBox();
+
   const mat = makeGlowMaterial(hasColor, pointSizePx);
+  if (mat?.uniforms?.uSquareMix) mat.uniforms.uSquareMix.value = squareMix;
+  if (mat?.uniforms?.uMorph) mat.uniforms.uMorph.value = morphAmount;
 
   if (points) {
     points.geometry.dispose();
     points.material.dispose();
     scene.remove(points);
   }
-  points = new THREE.Points(g, mat);
+
+  points = new THREE.Points(geom, mat);
   points.frustumCulled = true;
   scene.add(points);
 
-  // Initialize camera-dependent uniforms for world-size mode
   const u = points.material.uniforms;
   if (u) {
     const pxPerUnit = innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5)));
-    u.uPxPerUnit.value = pxPerUnit; // CSS px per world unit
-    // If using world-size, match current pixel size choice at current distance
+    u.uPxPerUnit.value = pxPerUnit;
     if (u.uUseWorldSize.value > 0.5) {
       const refDist = camera.position.distanceTo(controls.target);
       u.uWorldSize.value = Math.max(1e-5, pointSizePx * refDist / pxPerUnit);
     }
   }
-  // Sync fog uniforms to current settings
+
   updateFog();
 }
 
@@ -647,6 +1111,7 @@ const models = [
   'point/tree-bush.ply',
   'point/tree-stump-2.ply',
   'point/room.ply',
+  'point/akl2.ply',
 ];
 let modelIndex = 0;
 
@@ -655,27 +1120,8 @@ function loadModel(path) {
   loader.load(
     path,
     (geom) => {
-      // recentre to origin
-      geom.computeBoundingBox();
-      const bb = geom.boundingBox;
-      const cx = (bb.min.x + bb.max.x) / 2;
-      const cy = (bb.min.y + bb.max.y) / 2;
-      const cz = (bb.min.z + bb.max.z) / 2;
-      geom.translate(-cx, -cy, -cz);
-
-      // normalize scale to ~2 world units
-      const maxDim = Math.max(
-        bb.max.x - bb.min.x,
-        bb.max.y - bb.min.y,
-        bb.max.z - bb.min.z
-      ) || 1;
-      const scale = 2 / maxDim;
-      geom.scale(scale, scale, scale);
-
-      // rotate model 30 degrees to the left (counterclockwise around Y)
-      geom.rotateY(THREE.MathUtils.degToRad(30));
-
-      originalGeom = geom;
+      originalGeom = prepareGeometryForView(geom);
+      setMorphAmount(0);
       buildPoints(); // initial draw
 
       // frame camera to points
@@ -714,6 +1160,9 @@ function loadModel(path) {
         const btn = document.getElementById('ui-model-btn');
         if (btn) btn.textContent = path.split('/').pop();
       } catch {}
+
+      const targetPath = MORPH_PAIRS[path] ?? null;
+      loadMorphTargetGeometry(targetPath);
     },
     undefined,
     (err) => console.error('PLY load error:', err)
@@ -806,6 +1255,7 @@ addEventListener('keydown', (e) => {
 function animate() {
   requestAnimationFrame(animate);
   controls.update();
+  updateBackgroundTextPose();
 
   // drive the pulse time
   if (points && points.material && points.material.uniforms) {
@@ -829,7 +1279,13 @@ addEventListener('resize', () => {
     // update pixels-per-unit for world-size sizing
     points.material.uniforms.uPxPerUnit.value = innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5)));
   }
+  updateBackgroundTextScale();
+  updateBackgroundTextPose();
+  syncMorphToScroll();
 });
+
+addEventListener('scroll', syncMorphToScroll, { passive: true });
+syncMorphToScroll();
 
 /* ---------------- Post FX Hotkeys ----------------
    b: toggle bloom | n/m: bloom strength -/+

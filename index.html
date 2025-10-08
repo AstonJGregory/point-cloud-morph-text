@@ -6,7 +6,8 @@
   <title>Three.js Point Cloud</title>
   <style>
     html,body{height:100%;margin:0}
-    canvas{display:block}
+    body{min-height:200vh;}
+    canvas{display:block; position:fixed; inset:0;}
     #ui-toggle{
       position:fixed; top:12px; left:12px; z-index:50;
       background:#111; color:#eee; border:1px solid #333; border-radius:6px;
@@ -61,6 +62,20 @@
     <div class="row"><label>Scatter</label>
       <input id="ui-scatter" type="range" min="0" max="0.5" step="0.001" />
       <div class="val" id="ui-scatter-val"></div>
+    </div>
+    <div class="row"><label>Square Mix</label>
+      <input id="ui-square" type="range" min="0" max="1" step="0.01" />
+      <div class="val" id="ui-square-val"></div>
+    </div>
+    <div class="row"><label>Glow Mode</label>
+      <select id="ui-glow-mode">
+        <option value="wave">Wave Front</option>
+        <option value="random">Random Flicker</option>
+      </select>
+    </div>
+    <div class="row"><label>Random Speed</label>
+      <input id="ui-random-speed" type="range" min="0.1" max="5" step="0.1" />
+      <div class="val" id="ui-random-speed-val"></div>
     </div>
     <div class="row"><label>World-size</label>
       <input id="ui-worldsize" type="checkbox" />
@@ -121,6 +136,13 @@
       <input id="ui-bg" type="color" />
       <div class="val" id="ui-bg-val"></div>
     </div>
+    <div class="row"><label>Text</label>
+      <input id="ui-bg-text" type="text" placeholder="POINT CLOUDS" />
+    </div>
+    <div class="row"><label>Text Color</label>
+      <input id="ui-bg-text-color" type="color" value="#ffffff" />
+      <div class="val" id="ui-bg-text-color-val"></div>
+    </div>
 
     <h3>Post FX</h3>
     <div class="row"><label>Edge Blur</label>
@@ -165,6 +187,20 @@
     <div class="row"><label>Hue</label>
       <input id="ui-hue" type="range" min="-1" max="1" step="0.01" />
       <div class="val" id="ui-hue-val"></div>
+    </div>
+    <div class="row"><label>LUT Preset</label>
+      <select id="ui-lut">
+        <option value="none">None</option>
+        <option value="warm">Warm Glow</option>
+        <option value="green">Green Lift</option>
+        <option value="mutedUrban">Muted Urban</option>
+        <option value="forest">Forest Boost</option>
+        <option value="latest">Latest LUT</option>
+      </select>
+    </div>
+    <div class="row"><label>LUT Intensity</label>
+      <input id="ui-lut-intensity" type="range" min="0" max="1" step="0.01" />
+      <div class="val" id="ui-lut-intensity-val"></div>
     </div>
     <div class="row"><label>FXAA</label>
       <input id="ui-fxaa" type="checkbox" />
