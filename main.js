@@ -1110,7 +1110,6 @@ function buildPoints() {
 const models = [
   'point/tree-bush.ply',
   'point/tree-stump-2.ply',
-  'point/akl2.ply',
 ];
 let modelIndex = 0;
 
