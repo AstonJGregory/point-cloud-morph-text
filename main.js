@@ -761,6 +761,89 @@ function handleWheelForMorph(event) {
   setMorphAmount(next);
 }
 
+/* ---------------- Touch Morph (Mobile Scroll Emulation) ---------------- */
+const TOUCH_MORPH_SENSITIVITY = 1.4;
+const touchMorphState = {
+  pointerId: null,
+  startX: 0,
+  startY: 0,
+  startMorph: 0,
+  active: false,
+  deciding: false,
+  prevControlsEnabled: true,
+};
+
+function touchMorphReset() {
+  if (touchMorphState.pointerId === null) return;
+  if (touchMorphState.active) {
+    controls.enabled = touchMorphState.prevControlsEnabled;
+  }
+  touchMorphState.pointerId = null;
+  touchMorphState.active = false;
+  touchMorphState.deciding = false;
+}
+
+function shouldIgnoreTouchEvent(target) {
+  if (!target) return false;
+  if (typeof target.closest !== 'function') return false;
+  if (target.closest('#ui-panel')) return true;
+  if (target.closest('#ui-toggle')) return true;
+  return false;
+}
+
+function handlePointerDownForMorph(event) {
+  if (event.pointerType !== 'touch') return;
+  if (!allowWheelMorph) return;
+  if (touchMorphState.pointerId !== null) return;
+  if (shouldIgnoreTouchEvent(event.target)) return;
+
+  touchMorphState.pointerId = event.pointerId;
+  touchMorphState.startX = event.clientX;
+  touchMorphState.startY = event.clientY;
+  touchMorphState.startMorph = morphAmount;
+  touchMorphState.deciding = true;
+  touchMorphState.active = false;
+  touchMorphState.prevControlsEnabled = controls.enabled;
+}
+
+function handlePointerMoveForMorph(event) {
+  if (event.pointerId !== touchMorphState.pointerId) return;
+  if (!allowWheelMorph) return;
+
+  const dx = event.clientX - touchMorphState.startX;
+  const dy = event.clientY - touchMorphState.startY;
+
+  if (touchMorphState.deciding) {
+    const threshold = 6;
+    if (Math.abs(dx) + Math.abs(dy) < threshold) return;
+    if (Math.abs(dy) > Math.abs(dx) * 1.35) {
+      touchMorphState.active = true;
+      touchMorphState.deciding = false;
+      controls.enabled = false;
+    } else {
+      touchMorphReset();
+      return;
+    }
+  }
+
+  if (!touchMorphState.active) return;
+  event.preventDefault();
+  const delta = (touchMorphState.startY - event.clientY) / innerHeight;
+  const next = touchMorphState.startMorph + delta * TOUCH_MORPH_SENSITIVITY;
+  setMorphAmount(next);
+}
+
+function handlePointerEndForMorph(event) {
+  if (event.pointerId !== touchMorphState.pointerId) return;
+  touchMorphReset();
+}
+
+window.addEventListener('pointerdown', handlePointerDownForMorph, { capture: true, passive: false });
+window.addEventListener('pointermove', handlePointerMoveForMorph, { capture: true, passive: false });
+window.addEventListener('pointerup', handlePointerEndForMorph, { capture: true, passive: true });
+window.addEventListener('pointercancel', handlePointerEndForMorph, { capture: true, passive: true });
+window.addEventListener('pointerleave', handlePointerEndForMorph, { capture: true, passive: true });
+
 function loadMorphTargetGeometry(path) {
   morphTargetGeom = null;
   if (!path) {
